@@ -1,0 +1,7 @@
+name: "VELUX ACTIVE (HomeKit local)"
+packageKey: "velux-active-homekit-local"
+description: "Local control of VELUX ACTIVE with NETATMO (KIX 300) windows, blinds and sensors over HomeKit, directly from the hub"
+vendorSupportInformation: "https://github.com/Stoeckie"
+permissions:
+  lan: {}
+  discovery: {}

@@ -1,0 +1,41 @@
+name: velux-gateway
+components:
+  - id: main
+    capabilities:
+      - id: refresh
+        version: 1
+    categories:
+      - name: Bridges
+preferences:
+  - name: homekitCode
+    title: HomeKit code
+    description: 8 digits on the gateway sticker (e.g. 123-45-678). Needed once for pairing.
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: ""
+  - name: ipAddress
+    title: Gateway IP (optional)
+    description: Leave on "auto" (found via mDNS). Only set when discovery fails.
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      default: "auto"
+  - name: hapPort
+    title: HomeKit port (optional)
+    description: 0 = auto (mDNS)
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 0
+      maximum: 65535
+      default: 0
+  - name: resetPairing
+    title: Remove pairing
+    description: Switch on to unpair the hub from the gateway (e.g. before sharing or re-pairing).
+    required: false
+    preferenceType: boolean
+    definition:
+      default: false
