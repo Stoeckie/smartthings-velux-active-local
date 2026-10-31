@@ -39,6 +39,10 @@ Rename the devices in the app; the gateway calls every window "Roof Window" and 
 | HomeKit port | `0` = auto; the KIX 300 uses **5001** (also used automatically when you set an IP) |
 | Remove pairing | Unpairs the hub from the gateway, e.g. before re-pairing |
 
+## Departure mode and rain sensor (optional)
+
+HomeKit has no lock, so the departure mode (all windows and blinds blocked, as with the departure switch) and the gateway's rain sensor are not in this driver. They come from the VELUX cloud through the [Stoeckie Bridge](https://github.com/Stoeckie/smartthings-stoeckie-bridge): a **VELUX vertrekstand** lock device (lock and unlock) and a **VELUX regensensor** device (water sensor: wet = raining). The windows keep running locally through this driver.
+
 ## Troubleshooting
 
 * **Gateway not found / no open port**: on our gateway the HomeKit service was off (the gateway answered ping, but had no open ports and no mDNS record). A Wi-Fi reset fixed it: hold the gear button on the back until the LED blinks red, release, press again to confirm, then set up Wi-Fi again in the VELUX ACTIVE app (Settings → Gateway). Window pairings are kept. After that port 5001 was open.
