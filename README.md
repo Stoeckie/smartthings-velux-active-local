@@ -51,6 +51,8 @@ If VELUX gateway device > Connection is Offline, then send a notification to mem
 
 Short drops (a reconnect or one missed poll) are ignored: Connection only turns Offline after 2 minutes without a connection.
 
+Every drop is remembered. When the connection is back, the device shows **Last drop**: time (UTC), how long it lasted and the reason (for example "session closed" or "timeout"). Older drops are in the device history.
+
 ## Troubleshooting
 
 * **Gateway not found / no open port**: on our gateway the HomeKit service was off (the gateway answered ping, but had no open ports and no mDNS record). A Wi-Fi reset fixed it: hold the gear button on the back until the LED blinks red, release, press again to confirm, then set up Wi-Fi again in the VELUX ACTIVE app (Settings → Gateway). Window pairings are kept. After that port 5001 was open.

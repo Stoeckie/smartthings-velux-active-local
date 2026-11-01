@@ -12,19 +12,40 @@ local capabilities = require "st.capabilities"
 -- Connection status as a capability, so routines can notify when this device loses its connection
 -- (SmartThings itself has no "device offline" trigger for routines).
 -- Short drops (a reconnect, one missed poll) are ignored: Offline is only emitted after CONN_GRACE seconds down.
+-- Every drop is remembered (time, duration, reason) and shown as "Last drop" once the connection is back.
 local conn_cap = capabilities["silvervalley08660.connectionStatus"]
+local drop_cap = capabilities["silvervalley08660.connectionLog"]
 local CONN_GRACE = 120
 local function emit_conn(dev, v)
   if dev:get_field("conn_status") == v then return end
   local ok = pcall(function() dev:emit_event(conn_cap.status(v)) end)
   if ok then dev:set_field("conn_status", v) end
 end
-local function set_conn(dev, up)
+local function fmt_secs(s)
+  if s < 120 then return string.format("%d s", s) end
+  if s < 7200 then return string.format("%d min", s // 60) end
+  return string.format("%.1f h", s / 3600)
+end
+local function note_drop(dev, reason)
+  if dev:get_field("conn_drop") then return end
+  dev:set_field("conn_drop", { at = os.time(), reason = tostring(reason or "unknown"):sub(1, 120) }, { persist = true })
+end
+local function report_drop(dev)
+  local d = dev:get_field("conn_drop")
+  if type(d) ~= "table" or not d.at then return end
+  dev:set_field("conn_drop", nil, { persist = true })
+  local txt = string.format("%s UTC, %s: %s", os.date("!%Y-%m-%d %H:%M:%S", d.at), fmt_secs(math.max(0, os.time() - d.at)), tostring(d.reason))
+  require("log").info("[conn] " .. tostring(dev.label) .. " back after drop at " .. txt)
+  pcall(function() dev:emit_event(drop_cap.lastDrop(txt:sub(1, 200))) end)
+end
+local function set_conn(dev, up, reason)
   if up then
     dev:set_field("conn_down_since", nil)
+    report_drop(dev)
     emit_conn(dev, "online")
     return
   end
+  note_drop(dev, reason)
   if dev:get_field("conn_down_since") then return end
   local since = os.time()
   dev:set_field("conn_down_since", since)
@@ -42,7 +63,7 @@ local hap = require "hap_client"
 local bignum = require "bignum"
 local model_lib = require "velux_model"
 
-local BUILD = "2026-11-01b"
+local BUILD = "2026-11-01c"
 local REQUEST_TIMEOUT = 15
 local POLL_SECS = 300
 local RECONNECT_MIN, RECONNECT_MAX = 10, 300
@@ -274,6 +295,7 @@ local function run_session(driver, parent)
       log.info("[velux] not paired: enter the HomeKit code in the gateway settings")
       return
     end
+    local drop_reason
     local sock, err = open_socket(parent, 20)
     if sock then
       c.sock, c.alive, c.responses = sock, true, {}
@@ -307,12 +329,14 @@ local function run_session(driver, parent)
           local msg, rerr = s:read_message()
           if not msg then
             if c.alive then log.warn("[velux] session closed: " .. tostring(rerr)) end
+            drop_reason = "session closed: " .. tostring(rerr)
             break
           end
           if msg.event then s:_dispatch_event(msg) else c.responses[#c.responses + 1] = msg end
         end
       else
         log.error("[velux] session setup failed: " .. tostring(verr))
+        drop_reason = "session setup failed: " .. tostring(verr)
         if tostring(verr):find("unknown accessory id") or tostring(verr):find("authentication") then
           log.error("[velux] the gateway no longer knows this hub; remove pairing and pair again")
         end
@@ -320,9 +344,10 @@ local function run_session(driver, parent)
       close_conn(c)
     else
       log.warn("[velux] " .. tostring(err))
+      drop_reason = "no connection: " .. tostring(err)
     end
     if c.stopped then return end
-    set_conn(parent, false); parent:offline()
+    set_conn(parent, false, drop_reason); parent:offline()
     set_children_online(driver, parent, false)
     cosock.socket.sleep(backoff)
     backoff = math.min(backoff * 2, RECONNECT_MAX)
