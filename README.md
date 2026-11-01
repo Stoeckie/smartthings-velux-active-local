@@ -41,7 +41,7 @@ Rename the devices in the app; the gateway calls every window "Roof Window" and 
 
 ## Departure mode and rain sensor (optional)
 
-HomeKit has no lock, so the departure mode (all windows and blinds blocked, as with the departure switch) and the gateway's rain sensor are not in this driver. They come from the VELUX cloud through the [Stoeckie Bridge](https://github.com/Stoeckie/smartthings-stoeckie-bridge): a **VELUX vertrekstand** lock device (lock and unlock) and a **VELUX regensensor** device (rain sensor: detected = raining). The windows keep running locally through this driver.
+HomeKit has no lock, so the departure mode (all windows and blinds blocked, as with the departure switch) and the gateway's rain sensor are not in this driver. They come from the VELUX cloud through the [Stoeckie Bridge](https://github.com/Stoeckie/smartthings-stoeckie-bridge): a **VELUX vertrekstand** lock device (lock and unlock) and a **VELUX regensensor** device (rain sensor: detected = raining), updated every 60 s (adjustable in the settings of VELUX vertrekstand). The windows keep running locally through this driver.
 
 ## Troubleshooting
 
