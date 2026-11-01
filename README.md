@@ -49,6 +49,8 @@ SmartThings has no routine trigger for "device offline". The VELUX gateway devic
 
 If VELUX gateway device > Connection is Offline, then send a notification to members.
 
+Short drops (a reconnect or one missed poll) are ignored: Connection only turns Offline after 2 minutes without a connection.
+
 ## Troubleshooting
 
 * **Gateway not found / no open port**: on our gateway the HomeKit service was off (the gateway answered ping, but had no open ports and no mDNS record). A Wi-Fi reset fixed it: hold the gear button on the back until the LED blinks red, release, press again to confirm, then set up Wi-Fi again in the VELUX ACTIVE app (Settings → Gateway). Window pairings are kept. After that port 5001 was open.

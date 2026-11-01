@@ -11,12 +11,29 @@ local capabilities = require "st.capabilities"
 
 -- Connection status as a capability, so routines can notify when this device loses its connection
 -- (SmartThings itself has no "device offline" trigger for routines).
+-- Short drops (a reconnect, one missed poll) are ignored: Offline is only emitted after CONN_GRACE seconds down.
 local conn_cap = capabilities["silvervalley08660.connectionStatus"]
-local function set_conn(dev, up)
-  local v = up and "online" or "offline"
+local CONN_GRACE = 120
+local function emit_conn(dev, v)
   if dev:get_field("conn_status") == v then return end
   local ok = pcall(function() dev:emit_event(conn_cap.status(v)) end)
   if ok then dev:set_field("conn_status", v) end
+end
+local function set_conn(dev, up)
+  if up then
+    dev:set_field("conn_down_since", nil)
+    emit_conn(dev, "online")
+    return
+  end
+  if dev:get_field("conn_down_since") then return end
+  local since = os.time()
+  dev:set_field("conn_down_since", since)
+  local ok = pcall(function()
+    dev.thread:call_with_delay(CONN_GRACE, function()
+      if dev:get_field("conn_down_since") == since then emit_conn(dev, "offline") end
+    end)
+  end)
+  if not ok then emit_conn(dev, "offline") end
 end
 local log = require "log"
 local cosock = require "cosock"
@@ -25,7 +42,7 @@ local hap = require "hap_client"
 local bignum = require "bignum"
 local model_lib = require "velux_model"
 
-local BUILD = "2026-11-01a"
+local BUILD = "2026-11-01b"
 local REQUEST_TIMEOUT = 15
 local POLL_SECS = 300
 local RECONNECT_MIN, RECONNECT_MAX = 10, 300
