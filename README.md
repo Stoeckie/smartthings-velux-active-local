@@ -43,6 +43,12 @@ Rename the devices in the app; the gateway calls every window "Roof Window" and 
 
 HomeKit has no lock, so the departure mode (all windows and blinds blocked, as with the departure switch) and the gateway's rain sensor are not in this driver. They come from the VELUX cloud through the [Stoeckie Bridge](https://github.com/Stoeckie/smartthings-stoeckie-bridge): a **VELUX vertrekstand** lock device (lock and unlock) and a **VELUX regensensor** device (rain sensor: detected = raining), updated every 60 s (adjustable in the settings of VELUX vertrekstand). The windows keep running locally through this driver.
 
+## Offline notification
+
+SmartThings has no routine trigger for "device offline". The VELUX gateway device therefore has a **Connection** status (Connected or Offline). Make a routine to get a message:
+
+If VELUX gateway device > Connection is Offline, then send a notification to members.
+
 ## Troubleshooting
 
 * **Gateway not found / no open port**: on our gateway the HomeKit service was off (the gateway answered ping, but had no open ports and no mDNS record). A Wi-Fi reset fixed it: hold the gear button on the back until the LED blinks red, release, press again to confirm, then set up Wi-Fi again in the VELUX ACTIVE app (Settings → Gateway). Window pairings are kept. After that port 5001 was open.

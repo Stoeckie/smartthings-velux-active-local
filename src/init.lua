@@ -8,6 +8,16 @@
 -- on the hub as persistent device fields.
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
+
+-- Connection status as a capability, so routines can notify when this device loses its connection
+-- (SmartThings itself has no "device offline" trigger for routines).
+local conn_cap = capabilities["silvervalley08660.connectionStatus"]
+local function set_conn(dev, up)
+  local v = up and "online" or "offline"
+  if dev:get_field("conn_status") == v then return end
+  local ok = pcall(function() dev:emit_event(conn_cap.status(v)) end)
+  if ok then dev:set_field("conn_status", v) end
+end
 local log = require "log"
 local cosock = require "cosock"
 local json = require "st.json"
@@ -15,7 +25,7 @@ local hap = require "hap_client"
 local bignum = require "bignum"
 local model_lib = require "velux_model"
 
-local BUILD = "2026-10-30c"
+local BUILD = "2026-11-01a"
 local REQUEST_TIMEOUT = 15
 local POLL_SECS = 300
 local RECONNECT_MIN, RECONNECT_MAX = 10, 300
@@ -263,7 +273,7 @@ local function run_session(driver, parent)
           local _, serr = s:subscribe(ids)
           if serr then log.warn("[velux] subscribe: " .. tostring(serr)) end
         end
-        parent:online()
+        parent:online(); set_conn(parent, true)
         set_children_online(driver, parent, true)
         local all = {}
         for key in pairs(c.model.devices) do all[key] = true end
@@ -295,7 +305,7 @@ local function run_session(driver, parent)
       log.warn("[velux] " .. tostring(err))
     end
     if c.stopped then return end
-    parent:offline()
+    set_conn(parent, false); parent:offline()
     set_children_online(driver, parent, false)
     cosock.socket.sleep(backoff)
     backoff = math.min(backoff * 2, RECONNECT_MAX)
