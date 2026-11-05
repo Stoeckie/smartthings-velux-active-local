@@ -63,10 +63,11 @@ local hap = require "hap_client"
 local bignum = require "bignum"
 local model_lib = require "velux_model"
 
-local BUILD = "2026-11-01c"
+local BUILD = "2026-11-05a"
 local REQUEST_TIMEOUT = 15
 local POLL_SECS = 300
 local RECONNECT_MIN, RECONNECT_MAX = 10, 300
+local READ_IDLE = 20 -- seconds the reader loop waits before checking whether the session is still wanted
 
 local windowShade = capabilities.windowShade
 local windowShadeLevel = capabilities.windowShadeLevel
@@ -277,6 +278,8 @@ local function make_waiter(c)
     while #c.responses == 0 do
       if not c.alive then return nil, "connection closed" end
       if now() > deadline then
+        log.warn("[velux] no response from the gateway: reconnecting")
+        c.close_reason = "no response"
         close_conn(c) -- resync: a late response would otherwise be taken by the next request
         return nil, "timeout"
       end
@@ -319,20 +322,25 @@ local function run_session(driver, parent)
         emit_touched(driver, parent, c, all)
         log.info(string.format("[velux] session up, %d device(s)", #c.model.order))
         backoff = RECONNECT_MIN
-        -- reader loop: this task owns the socket from now on
-        sock:settimeout(nil)
+        -- Reader loop: this task owns the socket from now on. It wakes up every READ_IDLE seconds: on the
+        -- hub, closing a socket does not wake a coroutine that is blocked in receive, so without this a
+        -- dead connection (closed after a request timeout) left the session hanging forever.
+        sock:settimeout(READ_IDLE)
         s.on_event = function(chars)
           emit_touched(driver, parent, c, model_lib.apply(c.model, chars))
         end
         s.wait_response = make_waiter(c)
         while c.alive do
           local msg, rerr = s:read_message()
-          if not msg then
+          if msg then
+            if msg.event then s:_dispatch_event(msg) else c.responses[#c.responses + 1] = msg end
+          elseif rerr == "timeout" and c.alive then
+            -- idle: nothing to read, the connection is still ours
+          else
             if c.alive then log.warn("[velux] session closed: " .. tostring(rerr)) end
-            drop_reason = "session closed: " .. tostring(rerr)
+            drop_reason = "session closed: " .. tostring(c.alive and rerr or (c.close_reason or rerr))
             break
           end
-          if msg.event then s:_dispatch_event(msg) else c.responses[#c.responses + 1] = msg end
         end
       else
         log.error("[velux] session setup failed: " .. tostring(verr))

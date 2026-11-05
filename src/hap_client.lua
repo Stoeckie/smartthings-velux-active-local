@@ -126,21 +126,31 @@ function Session:_recv_raw(n)
   return data
 end
 
--- read exactly n raw bytes
-function Session:_read_exact(n)
-  local parts, have = {}, 0
+-- read exactly n raw bytes. With a socket timeout set: a timeout before the first byte is returned as
+-- "timeout" when idle_ok (the caller can check its own state and read again, nothing is lost); a timeout
+-- in the middle keeps waiting a few times, so a slow frame is not cut in half.
+local MID_FRAME_TIMEOUTS = 4
+function Session:_read_exact(n, idle_ok)
+  local parts, have, waits = {}, 0, 0
   while have < n do
     local d, err = self:_recv_raw(n - have)
-    if not d then return nil, err end
-    parts[#parts + 1] = d
-    have = have + #d
+    if not d then
+      if err == "timeout" and have > 0 and waits < MID_FRAME_TIMEOUTS then
+        waits = waits + 1
+      else
+        return nil, err
+      end
+    else
+      parts[#parts + 1] = d
+      have = have + #d
+    end
   end
   return table.concat(parts)
 end
 
 -- read and decrypt one frame, append to self.plain
 function Session:_read_frame()
-  local hdr, err = self:_read_exact(2)
+  local hdr, err = self:_read_exact(2, true)
   if not hdr then return nil, err end
   local len = string.unpack("<I2", hdr)
   local ct, err2 = self:_read_exact(len + 16)
@@ -234,18 +244,34 @@ end
 function Session:pair_setup(pin, controller_id, opts)
   opts = opts or {}
   local yield = opts.yield or function() end
+  local progress = opts.progress or function() end
   -- M1
+  progress("M1 sent")
   local r, err = tlv_request(self, "/pair-setup", { { T.state, u8(1) }, { T.method, u8(opts.method or 0) } })
   if not r then return nil, "M2: " .. err end
   local salt, B = tlv.get(r, T.salt), tlv.get(r, T.public_key)
   if not salt or not B then return nil, "M2: no salt/B" end
-  -- M3 (the slow part: two 3072-bit modpows)
-  local client = srp.new("Pair-Setup", pin, salt, B, M.random_bytes(32))
+  progress("M2 received, computing SRP")
+  -- M3 (the slow part: two 3072-bit modpows). A does not depend on the code, so it is computed
+  -- first; accessories with a code on their display (Honeywell T6) only show it after M1, so pin may be
+  -- a function that waits for the user to type it.
+  local client = srp.new("Pair-Setup", "", salt, B, M.random_bytes(32))
+  yield()
+  if type(pin) == "function" then
+    progress("waiting for the code")
+    local perr
+    pin, perr = pin()
+    if not pin then return nil, "M3: " .. tostring(perr or "no code") end
+    progress("code received, computing SRP")
+  end
+  client.P = pin
   yield()
   local A, M1 = client:public_key(), client:proof()
   yield()
+  progress("M3 sent")
   r, err = tlv_request(self, "/pair-setup", { { T.state, u8(3) }, { T.public_key, A }, { T.proof, M1 } })
   if not r then return nil, "M4: " .. err end
+  progress("M4 received")
   if not client:verify_server_proof(tlv.get(r, T.proof) or "") then return nil, "M4: accessory proof invalid" end
   local K = client:session_key()
   -- M5: controller identity, signed with its long-term key
