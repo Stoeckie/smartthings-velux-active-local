@@ -76,8 +76,9 @@ local json = require "st.json"
 local hap = require "hap_client"
 local bignum = require "bignum"
 local model_lib = require "velux_model"
+local emitq = require "emitq"  -- only changed values go to the hub (see emitq.lua)
 
-local BUILD = "2026-11-08b"
+local BUILD = "2026-11-09a"
 local REQUEST_TIMEOUT = 15
 local POLL_SECS = 300
 local RECONNECT_MIN, RECONNECT_MAX = 10, 60 -- back within a minute after the gateway returns
@@ -225,26 +226,26 @@ local function emit_child(child, dev)
   local v = dev.values
   if dev.kind == "climate" then
     if v.temperature ~= nil then
-      child:emit_event(capabilities.temperatureMeasurement.temperature({ value = tonumber(v.temperature), unit = "C" }))
+      emitq.emit(child, capabilities.temperatureMeasurement.temperature({ value = tonumber(v.temperature), unit = "C" }))
     end
     if v.humidity ~= nil then
-      child:emit_event(capabilities.relativeHumidityMeasurement.humidity(math.floor(tonumber(v.humidity) + 0.5)))
+      emitq.emit(child, capabilities.relativeHumidityMeasurement.humidity(math.floor(tonumber(v.humidity) + 0.5)))
     end
     if v.co2 ~= nil then
-      child:emit_event(capabilities.carbonDioxideMeasurement.carbonDioxide({ value = tonumber(v.co2), unit = "ppm" }))
+      emitq.emit(child, capabilities.carbonDioxideMeasurement.carbonDioxide({ value = tonumber(v.co2), unit = "ppm" }))
     end
     return
   end
   local st, pos = model_lib.shade_state(dev)
-  if pos then child:emit_event(windowShadeLevel.shadeLevel(math.max(0, math.min(100, math.floor(pos + 0.5))))) end
+  if pos then emitq.emit(child, windowShadeLevel.shadeLevel(math.max(0, math.min(100, math.floor(pos + 0.5))))) end
   if dev.kind == "window" and pos and child:supports_capability(capabilities.contactSensor) then
-    child:emit_event(pos > 0 and capabilities.contactSensor.contact.open() or capabilities.contactSensor.contact.closed())
+    emitq.emit(child, pos > 0 and capabilities.contactSensor.contact.open() or capabilities.contactSensor.contact.closed())
   end
   local ev = ({ open = windowShade.windowShade.open, closed = windowShade.windowShade.closed,
                 opening = windowShade.windowShade.opening, closing = windowShade.windowShade.closing,
                 ["partially open"] = windowShade.windowShade.partially_open,
                 unknown = windowShade.windowShade.unknown })[st]
-  if ev then child:emit_event(ev()) end
+  if ev then emitq.emit(child, ev()) end
 end
 
 local function emit_touched(driver, parent, c, touched)
@@ -559,6 +560,7 @@ local function info_changed(driver, device, event, args)
 end
 
 local function device_removed(driver, device)
+  emitq.forget(device)
   local c = conns[device.id]
   if c then
     c.stopped = true

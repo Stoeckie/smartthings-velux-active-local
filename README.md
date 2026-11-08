@@ -55,6 +55,10 @@ Short drops (a reconnect or one missed poll) are ignored: Connection only turns 
 
 Every drop is remembered. When the connection is back, the device shows **Last drop**: time (UTC), how long it lasted and the reason (for example "session closed" or "timeout"). Older drops are in the device history.
 
+## Events
+
+A value only goes to the hub when it changed. After a driver start every value is sent once so the app catches up on anything it missed. (Re-emitting unchanged values makes the hub drop events of a device, and the app then keeps a stale value.)
+
 ## Troubleshooting
 
 * **Gateway not found / no open port**: on our gateway the HomeKit service was off (the gateway answered ping, but had no open ports and no mDNS record). A Wi-Fi reset fixed it: hold the gear button on the back until the LED blinks red, release, press again to confirm, then set up Wi-Fi again in the VELUX ACTIVE app (Settings → Gateway). Window pairings are kept. After that port 5001 was open.
