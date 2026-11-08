@@ -11,6 +11,15 @@ components:
     categories:
       - name: Bridges
 preferences:
+  - name: offlineAfter
+    title: Offline after (minutes)
+    description: "Connection only turns Offline after this many minutes without contact, so a short network outage (e.g. a router update at night) gives no notification."
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 120
+      default: 5
   - name: homekitCode
     title: HomeKit code
     description: 8 digits on the gateway sticker (e.g. 123-45-678). Needed once for pairing.
