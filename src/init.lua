@@ -78,7 +78,7 @@ local bignum = require "bignum"
 local model_lib = require "velux_model"
 local emitq = require "emitq"  -- only changed values go to the hub (see emitq.lua)
 
-local BUILD = "2026-11-09b"
+local BUILD = "2026-11-09c"
 local REQUEST_TIMEOUT = 15
 local POLL_SECS = 300
 local RECONNECT_MIN, RECONNECT_MAX = 10, 60 -- back within a minute after the gateway returns
@@ -459,14 +459,52 @@ local function child_target(driver, child)
   return c, dev
 end
 
+-- Writes that arrive together (a routine that moves three roof windows) go to the gateway as one request, like
+-- a HomeKit scene. Sent one by one at the same moment, only the first window moved (2026-11-09 07:00).
+local BATCH_DELAY = 0.4
+local function flush_writes(c)
+  local items, labels = c.write_queue or {}, c.write_labels or {}
+  c.write_queue, c.write_labels, c.write_timer = nil, nil, nil
+  if #items == 0 or not c.alive then return end
+  for attempt = 1, 2 do
+    local res, err = c.session:put(items)
+    local failed = {}
+    if res and type(res.characteristics) == "table" then
+      for _, r in ipairs(res.characteristics) do
+        if tonumber(r.status) and tonumber(r.status) ~= 0 then failed[#failed + 1] = tostring(r.aid) .. "." .. tostring(r.iid) .. "=" .. tostring(r.status) end
+      end
+    end
+    if not err and #failed == 0 then
+      log.info("[velux] sent " .. table.concat(labels, ", "))
+      return
+    end
+    log.warn("[velux] write " .. table.concat(labels, ", ") .. " failed (" .. tostring(err or table.concat(failed, " "))
+      .. ")" .. (attempt == 1 and ", trying again" or ""))
+    if attempt == 1 then cosock.socket.sleep(2) end
+    if not c.alive then return end
+  end
+end
+
 local function write(driver, child, field, value)
   local c, dev = child_target(driver, child)
   if not (c and c.alive and dev and dev.chars[field]) then
     log.warn("[velux] " .. child.label .. ": not connected")
     return
   end
-  local _, err = c.session:put({ { aid = dev.aid, iid = dev.chars[field], value = value } })
-  if err then log.error("[velux] " .. child.label .. " write failed: " .. tostring(err)) end
+  c.write_queue = c.write_queue or {}
+  c.write_labels = c.write_labels or {}
+  -- a newer value for the same characteristic replaces the queued one
+  for i, it in ipairs(c.write_queue) do
+    if it.aid == dev.aid and it.iid == dev.chars[field] then
+      table.remove(c.write_queue, i); table.remove(c.write_labels, i); break
+    end
+  end
+  c.write_queue[#c.write_queue + 1] = { aid = dev.aid, iid = dev.chars[field], value = value }
+  c.write_labels[#c.write_labels + 1] = child.label .. " " .. field .. "=" .. tostring(value)
+  if not c.write_timer then
+    c.write_timer = true
+    cosock.spawn(function() cosock.socket.sleep(BATCH_DELAY); flush_writes(c) end, "velux-write")
+  end
 end
 
 local function handle_open(driver, child) write(driver, child, "target", 100) end
