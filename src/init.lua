@@ -78,7 +78,7 @@ local bignum = require "bignum"
 local model_lib = require "velux_model"
 local emitq = require "emitq"  -- only changed values go to the hub (see emitq.lua)
 
-local BUILD = "2026-11-09a"
+local BUILD = "2026-11-09b"
 local REQUEST_TIMEOUT = 15
 local POLL_SECS = 300
 local RECONNECT_MIN, RECONNECT_MAX = 10, 60 -- back within a minute after the gateway returns
@@ -505,6 +505,9 @@ end
 local function is_parent(device) return device.parent_assigned_child_key == nil end
 
 local function device_init(driver, device)
+  -- keep the random pool for HomeKit keys across restarts (see rng.lua)
+  hap.rng.seed(device:get_field("rng_pool"))
+  hap.rng.save = function(p) device:set_field("rng_pool", (p:gsub(".", function(c) return string.format("%02x", c:byte()) end)), { persist = true }) end
   if not is_parent(device) then
     if device:supports_capability(windowShade) then
       device:emit_event(windowShade.supportedWindowShadeCommands({ "open", "close", "pause" },
