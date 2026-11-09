@@ -78,7 +78,7 @@ local bignum = require "bignum"
 local model_lib = require "velux_model"
 local emitq = require "emitq"  -- only changed values go to the hub (see emitq.lua)
 
-local BUILD = "2026-11-09c"
+local BUILD = "2026-11-09d"
 local REQUEST_TIMEOUT = 15
 local POLL_SECS = 300
 local RECONNECT_MIN, RECONNECT_MAX = 10, 60 -- back within a minute after the gateway returns
@@ -89,6 +89,8 @@ local windowShadeLevel = capabilities.windowShadeLevel
 local PROFILE = { window = "velux-window", blind = "velux-blind", climate = "velux-climate" }
 
 hap.json = json
+-- requests on one session wait for each other (poll, refresh and the batched write never overlap)
+hap.sleep = function(s) cosock.socket.sleep(s) end
 
 local function now()
   local ok, t = pcall(cosock.socket.gettime)
@@ -304,8 +306,63 @@ local function make_waiter(c)
   end
 end
 
-local function run_session(driver, parent)
-  local c = conns[parent.id]
+-- one connection plus the reader loop; returns the drop reason. Runs inside pcall (see run_session).
+local function session_once(driver, parent, c, sock, pairing, on_up)
+  local drop_reason
+  c.sock, c.alive, c.responses = sock, true, {}
+  local s = hap.session(sock, { host = "velux" })
+  c.session = s
+  local ok, verr = s:pair_verify(pairing)
+  local accs
+  if ok then accs, verr = s:accessories() end
+  if accs then
+    c.model = model_lib.build(accs)
+    sync_children(driver, parent, c)
+    local ids = model_lib.read_ids(c.model)
+    if #ids > 0 then
+      local _, serr = s:subscribe(ids)
+      if serr then log.warn("[velux] subscribe: " .. tostring(serr)) end
+    end
+    parent:online(); set_conn(parent, true)
+    set_children_online(driver, parent, true)
+    local all = {}
+    for key in pairs(c.model.devices) do all[key] = true end
+    emit_touched(driver, parent, c, all)
+    log.info(string.format("[velux] session up, %d device(s)", #c.model.order))
+    on_up()
+    -- Reader loop: this task owns the socket from now on. It wakes up every READ_IDLE seconds: on the
+    -- hub, closing a socket does not wake a coroutine that is blocked in receive, so without this a
+    -- dead connection (closed after a request timeout) left the session hanging forever.
+    sock:settimeout(READ_IDLE)
+    s.on_event = function(chars)
+      emit_touched(driver, parent, c, model_lib.apply(c.model, chars))
+    end
+    s.wait_response = make_waiter(c)
+    while c.alive do
+      local msg, rerr = s:read_message()
+      if msg then
+        if msg.event then s:_dispatch_event(msg) else c.responses[#c.responses + 1] = msg end
+      elseif rerr == "timeout" and c.alive then
+        -- idle: nothing to read, the connection is still ours
+      else
+        if c.alive then log.warn("[velux] session closed: " .. tostring(rerr)) end
+        drop_reason = "session closed: " .. tostring(c.alive and rerr or (c.close_reason or rerr))
+        break
+      end
+    end
+  else
+    log.error("[velux] session setup failed: " .. tostring(verr))
+    drop_reason = "session setup failed: " .. tostring(verr)
+    if tostring(verr):find("unknown accessory id") or tostring(verr):find("authentication") then
+      log.error("[velux] the gateway no longer knows this hub; remove pairing and pair again")
+    end
+  end
+  return drop_reason
+end
+
+-- c is this session's own connection table (passed in, not read from conns): when start_session runs
+-- again meanwhile, the old task sees its own c.stopped and ends instead of sharing the new c.
+local function run_session(driver, parent, c)
   local backoff = RECONNECT_MIN
   while c and not c.stopped do
     local pairing = load_pairing(parent)
@@ -315,54 +372,18 @@ local function run_session(driver, parent)
     end
     local drop_reason
     local sock, err = open_socket(parent, 20)
+    if sock and c.stopped then -- replaced while connecting
+      pcall(function() sock:close() end)
+      return
+    end
     if sock then
-      c.sock, c.alive, c.responses = sock, true, {}
-      local s = hap.session(sock, { host = "velux" })
-      c.session = s
-      local ok, verr = s:pair_verify(pairing)
-      local accs
-      if ok then accs, verr = s:accessories() end
-      if accs then
-        c.model = model_lib.build(accs)
-        sync_children(driver, parent, c)
-        local ids = model_lib.read_ids(c.model)
-        if #ids > 0 then
-          local _, serr = s:subscribe(ids)
-          if serr then log.warn("[velux] subscribe: " .. tostring(serr)) end
-        end
-        parent:online(); set_conn(parent, true)
-        set_children_online(driver, parent, true)
-        local all = {}
-        for key in pairs(c.model.devices) do all[key] = true end
-        emit_touched(driver, parent, c, all)
-        log.info(string.format("[velux] session up, %d device(s)", #c.model.order))
-        backoff = RECONNECT_MIN
-        -- Reader loop: this task owns the socket from now on. It wakes up every READ_IDLE seconds: on the
-        -- hub, closing a socket does not wake a coroutine that is blocked in receive, so without this a
-        -- dead connection (closed after a request timeout) left the session hanging forever.
-        sock:settimeout(READ_IDLE)
-        s.on_event = function(chars)
-          emit_touched(driver, parent, c, model_lib.apply(c.model, chars))
-        end
-        s.wait_response = make_waiter(c)
-        while c.alive do
-          local msg, rerr = s:read_message()
-          if msg then
-            if msg.event then s:_dispatch_event(msg) else c.responses[#c.responses + 1] = msg end
-          elseif rerr == "timeout" and c.alive then
-            -- idle: nothing to read, the connection is still ours
-          else
-            if c.alive then log.warn("[velux] session closed: " .. tostring(rerr)) end
-            drop_reason = "session closed: " .. tostring(c.alive and rerr or (c.close_reason or rerr))
-            break
-          end
-        end
+      -- a Lua error (e.g. a malformed answer) must not leave c.alive set forever: close and reconnect
+      local ok, res = pcall(session_once, driver, parent, c, sock, pairing, function() backoff = RECONNECT_MIN end)
+      if ok then
+        drop_reason = res
       else
-        log.error("[velux] session setup failed: " .. tostring(verr))
-        drop_reason = "session setup failed: " .. tostring(verr)
-        if tostring(verr):find("unknown accessory id") or tostring(verr):find("authentication") then
-          log.error("[velux] the gateway no longer knows this hub; remove pairing and pair again")
-        end
+        log.error("[velux] session error: " .. tostring(res))
+        drop_reason = "session error: " .. tostring(res)
       end
       close_conn(c)
     else
@@ -384,8 +405,9 @@ local function start_session(driver, parent)
     old.stopped = true
     close_conn(old)
   end
-  conns[parent.id] = { responses = {} }
-  cosock.spawn(function() run_session(driver, parent) end, "velux-session-" .. parent.id)
+  local c = { responses = {} }
+  conns[parent.id] = c
+  cosock.spawn(function() run_session(driver, parent, c) end, "velux-session-" .. parent.id)
 end
 
 -- pairing ----------------------------------------------------------------------------------
@@ -404,10 +426,12 @@ local function pair(driver, parent)
   end
   conns[parent.id] = conns[parent.id] or { responses = {} }
   conns[parent.id].pairing = true
-  cosock.spawn(function()
-    local c = conns[parent.id]
+  local c = conns[parent.id]
+  local sock
+  local function attempt()
     refresh_address(parent)
-    local sock, err = open_socket(parent, 120)
+    local err
+    sock, err = open_socket(parent, 120)
     if not sock then
       log.error("[velux] pairing: " .. tostring(err) .. " (retry in 60 s)")
       c.pairing = false
@@ -418,7 +442,7 @@ local function pair(driver, parent)
     local t0 = now()
     local s = hap.session(sock, { host = "velux" })
     local p, perr = s:pair_setup(pin, uuid4(), { yield = function() cosock.socket.sleep(0) end })
-    sock:close()
+    pcall(function() sock:close() end)
     c.pairing = false
     if not p then
       log.error("[velux] pairing failed: " .. tostring(perr))
@@ -430,6 +454,16 @@ local function pair(driver, parent)
     save_pairing(parent, p)
     log.info(string.format("[velux] paired in %.0f s with accessory %s", now() - t0, tostring(p.accessory_id)))
     start_session(driver, parent)
+  end
+  cosock.spawn(function()
+    -- a Lua error (e.g. a malformed TLV answer) must not leave c.pairing set forever
+    local ok, e = pcall(attempt)
+    if not ok and c.pairing then
+      log.error("[velux] pairing error: " .. tostring(e) .. " (retry in 60 s)")
+      if sock then pcall(function() sock:close() end) end
+      c.pairing = false
+      parent.thread:call_with_delay(60, function() if not load_pairing(parent) then pair(driver, parent) end end)
+    end
   end, "velux-pair-" .. parent.id)
 end
 
@@ -462,16 +496,41 @@ end
 -- Writes that arrive together (a routine that moves three roof windows) go to the gateway as one request, like
 -- a HomeKit scene. Sent one by one at the same moment, only the first window moved (2026-11-09 07:00).
 local BATCH_DELAY = 0.4
+
+-- The write failed for good: show the last known real state again (forced), so a tile that was set to
+-- opening/closing right after the command does not keep spinning.
+local function restore_shades(c, kids)
+  for _, k in ipairs(kids or {}) do
+    local dev = c.model and c.model.devices[k.key]
+    if dev then
+      local st = model_lib.shade_state(dev)
+      local ev = ({ open = windowShade.windowShade.open, closed = windowShade.windowShade.closed,
+                    opening = windowShade.windowShade.opening, closing = windowShade.windowShade.closing,
+                    ["partially open"] = windowShade.windowShade.partially_open,
+                    unknown = windowShade.windowShade.unknown })[st]
+      if ev then emitq.try(k.child, ev(), nil, true) end
+    end
+  end
+end
+
 local function flush_writes(c)
-  local items, labels = c.write_queue or {}, c.write_labels or {}
-  c.write_queue, c.write_labels, c.write_timer = nil, nil, nil
-  if #items == 0 or not c.alive then return end
+  local items, labels, kids = c.write_queue or {}, c.write_labels or {}, c.write_kids or {}
+  c.write_queue, c.write_labels, c.write_kids, c.write_timer = nil, nil, nil, nil
+  if #items == 0 then return end
+  if not c.alive then restore_shades(c, kids); return end
+  local failed_kids = kids
   for attempt = 1, 2 do
     local res, err = c.session:put(items)
     local failed = {}
+    failed_kids = err and kids or {}
     if res and type(res.characteristics) == "table" then
       for _, r in ipairs(res.characteristics) do
-        if tonumber(r.status) and tonumber(r.status) ~= 0 then failed[#failed + 1] = tostring(r.aid) .. "." .. tostring(r.iid) .. "=" .. tostring(r.status) end
+        if tonumber(r.status) and tonumber(r.status) ~= 0 then
+          failed[#failed + 1] = tostring(r.aid) .. "." .. tostring(r.iid) .. "=" .. tostring(r.status)
+          for i, it in ipairs(items) do
+            if tostring(it.aid) == tostring(r.aid) and tostring(it.iid) == tostring(r.iid) then failed_kids[#failed_kids + 1] = kids[i] end
+          end
+        end
       end
     end
     if not err and #failed == 0 then
@@ -481,8 +540,9 @@ local function flush_writes(c)
     log.warn("[velux] write " .. table.concat(labels, ", ") .. " failed (" .. tostring(err or table.concat(failed, " "))
       .. ")" .. (attempt == 1 and ", trying again" or ""))
     if attempt == 1 then cosock.socket.sleep(2) end
-    if not c.alive then return end
+    if not c.alive then failed_kids = kids; break end
   end
+  restore_shades(c, failed_kids)
 end
 
 local function write(driver, child, field, value)
@@ -493,14 +553,25 @@ local function write(driver, child, field, value)
   end
   c.write_queue = c.write_queue or {}
   c.write_labels = c.write_labels or {}
+  c.write_kids = c.write_kids or {}
   -- a newer value for the same characteristic replaces the queued one
   for i, it in ipairs(c.write_queue) do
     if it.aid == dev.aid and it.iid == dev.chars[field] then
-      table.remove(c.write_queue, i); table.remove(c.write_labels, i); break
+      table.remove(c.write_queue, i); table.remove(c.write_labels, i); table.remove(c.write_kids, i); break
     end
   end
   c.write_queue[#c.write_queue + 1] = { aid = dev.aid, iid = dev.chars[field], value = value }
   c.write_labels[#c.write_labels + 1] = child.label .. " " .. field .. "=" .. tostring(value)
+  c.write_kids[#c.write_kids + 1] = { key = child.parent_assigned_child_key, child = child }
+  -- optimistic UI: show opening/closing at once (the gateway's own events follow when it moves)
+  if field == "target" then
+    local pos = tonumber(dev.values.position) or tonumber(dev.values.target)
+    local ev
+    if pos == nil then ev = value > 0 and windowShade.windowShade.opening or windowShade.windowShade.closing
+    elseif value > pos then ev = windowShade.windowShade.opening
+    elseif value < pos then ev = windowShade.windowShade.closing end
+    if ev then emitq.try(child, ev()) end
+  end
   if not c.write_timer then
     c.write_timer = true
     cosock.spawn(function() cosock.socket.sleep(BATCH_DELAY); flush_writes(c) end, "velux-write")
@@ -553,9 +624,12 @@ local function device_init(driver, device)
     end
     return
   end
-  device.thread:call_on_schedule(POLL_SECS, function()
+  -- added calls init again: keep only one poll timer per gateway
+  local old_timer = device:get_field("poll_timer")
+  if old_timer then pcall(device.thread.cancel_timer, device.thread, old_timer) end
+  device:set_field("poll_timer", device.thread:call_on_schedule(POLL_SECS, function()
     cosock.spawn(function() poll(driver, device) end, "velux-poll")
-  end, "velux-poll")
+  end, "velux-poll"))
   if load_pairing(device) then
     start_session(driver, device)
   else
